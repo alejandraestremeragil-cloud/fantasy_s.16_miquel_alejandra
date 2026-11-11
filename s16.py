@@ -342,6 +342,4 @@ def main():
             escala("5b. Escala: 60 jugadores, puntos correlacionados con el precio",
                    generar_jugadores_correlacionados(), args.limite_bruta, args.limite_bnb)
 
-
-if __name__ == "__main__":
-    main()
+main()
