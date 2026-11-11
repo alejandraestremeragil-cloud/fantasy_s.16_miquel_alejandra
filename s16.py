@@ -147,23 +147,48 @@ def solucion_inicial(jugadores, presupuesto, cupos):
                key=puntos_equipo)
 
 
-def branch_and_bound(jugadores, presupuesto, cupos):
-    """Decisiones fichar/no fichar; best-first con heapq y poda por cota."""
+def branch_and_bound(jugadores, presupuesto, cupos, max_segundos=None, cota="valida"):
+    """Decisiones fichar/no fichar; best-first con heapq y poda por cota.
+
+    Contadores:
+      extraidos = nodos sacados de la cola (algunos se podan justo al sacarlos)
+      abiertos  = nodos que de verdad se ramifican (se generan sus dos hijos)
+      podados   = nodos descartados (al generarlos o al sacarlos)
+
+    cota="valida" usa cota_superior; cota="ingenua" usa la fraccionaria con cupos
+    del enunciado (la trampa) para comprobar que con ella se pierde el óptimo.
+    """
     posiciones = tuple(cupos)
     orden = sorted(jugadores, key=lambda j: j["puntos"] / j["precio"], reverse=True)
     mejor = solucion_inicial(orden, presupuesto, cupos)
     max_puntos = puntos_equipo(mejor) if mejor else float("-inf")
     raiz = Nodo(0, 0, 0.0, (0,) * len(cupos), ())
-    limite = cota_superior(raiz, orden, presupuesto, cupos, posiciones)
+
+    def calcular_limite(nodo):
+        valido = cota_superior(nodo, orden, presupuesto, cupos, posiciones)
+        if cota == "valida" or valido == float("-inf"):
+            return valido  # (la factibilidad se comprueba igual en los dos modos)
+        faltan = {pos: cupos[pos] - nodo.cantidades[i] for i, pos in enumerate(posiciones)}
+        return nodo.puntos + cota_fraccionaria_ingenua_con_cupos(
+            orden[nodo.indice:], presupuesto - nodo.coste, faltan)
+
+    limite = calcular_limite(raiz)
     if limite == float("-inf"):
-        return {"equipo": [], "puntos": None, "abiertos": 0, "generados": 0, "podados": 1}
+        return {"equipo": [], "puntos": None, "abiertos": 0, "extraidos": 0,
+                "generados": 0, "podados": 1, "terminado": True}
 
     cola = [(-limite, 0, raiz)]  # Negativo: heapq es un heap de mínimos
-    contador = abiertos = podados = 0
+    contador = abiertos = extraidos = podados = 0
     generados = 1
+    terminado = True
+    inicio = timeit.default_timer()
     while cola:
+        if (max_segundos is not None and extraidos % 256 == 0
+                and timeit.default_timer() - inicio >= max_segundos):
+            terminado = False
+            break
         menos_limite, _, nodo = heapq.heappop(cola)
-        abiertos += 1
+        extraidos += 1
         if -menos_limite <= max_puntos + EPS:
             podados += 1
             continue
@@ -175,6 +200,7 @@ def branch_and_bound(jugadores, presupuesto, cupos):
             podados += 1
             continue
 
+        abiertos += 1  # Este nodo sí se ramifica
         j = orden[nodo.indice]
         pos = posiciones.index(j["posicion"])
         # Dos ramas: fichar el jugador actual o descartarlo.
@@ -191,7 +217,7 @@ def branch_and_bound(jugadores, presupuesto, cupos):
                         nodo.puntos + (j["puntos"] if fichar else 0),
                         tuple(cantidades),
                         nodo.elegidos + (nodo.indice,) if fichar else nodo.elegidos)
-            limite = cota_superior(hijo, orden, presupuesto, cupos, posiciones)
+            limite = calcular_limite(hijo)
             if limite > max_puntos + EPS:
                 contador += 1  # Evita comparar objetos Nodo en empates
                 heapq.heappush(cola, (-limite, contador, hijo))
@@ -200,7 +226,9 @@ def branch_and_bound(jugadores, presupuesto, cupos):
                 podados += 1
 
     return {"equipo": mejor, "puntos": max_puntos if mejor else None,
-            "abiertos": abiertos, "generados": generados, "podados": podados}
+            "abiertos": abiertos, "extraidos": extraidos,
+            "generados": generados, "podados": podados, "terminado": terminado}
+
 
 
 def generar_jugadores_aleatorios(semilla=16):
@@ -213,16 +241,29 @@ def generar_jugadores_aleatorios(semilla=16):
                               "puntos": round(azar.uniform(3, 10), 1)})
     return jugadores
 
+def generar_jugadores_correlacionados(semilla=16):
+    """Mismo reparto de posiciones, pero los puntos suben con el precio (más realista)."""
+    azar = random.Random(semilla)
+    jugadores = []
+    for pos, cantidad in {"POR": 8, "DEF": 21, "MED": 21, "DEL": 10}.items():
+        for i in range(1, cantidad + 1):
+            precio = azar.randint(3, 24)
+            puntos = round(min(10.0, max(1.0, 2.5 + 0.3 * precio + azar.uniform(-0.9, 0.9))), 1)
+            jugadores.append({"nombre": f"{pos}_{i:02d}", "posicion": pos,
+                              "precio": precio, "puntos": puntos})
+    return jugadores
 
-def medir(funcion, *args, **kwargs):
+
+def medir(funcion, *args, repeticiones=5, **kwargs):
+    """Devuelve (resultado, mejor tiempo de `repeticiones` ejecuciones)."""
     resultado = None
 
     def ejecutar():
         nonlocal resultado
         resultado = funcion(*args, **kwargs)
 
-    segundos = timeit.timeit(ejecutar, number=1)
-    return resultado, segundos
+    tiempos = timeit.repeat(ejecutar, number=1, repeat=repeticiones)
+    return resultado, min(tiempos)
 
 
 def imprimir_equipo(nombre, equipo, presupuesto, cupos):
@@ -233,11 +274,28 @@ def imprimir_equipo(nombre, equipo, presupuesto, cupos):
     for pos in cupos:
         print(f"  {pos}: {', '.join(j['nombre'] for j in equipo if j['posicion'] == pos) or '—'}")
 
+def escala(titulo, jugadores, limite_bruta, limite_bnb):
+    bruto, t_bruto = medir(fuerza_bruta, jugadores, PRESUPUESTO, CUPOS,
+                           max_segundos=limite_bruta, repeticiones=1)
+    bnb, t_bnb = medir(branch_and_bound, jugadores, PRESUPUESTO, CUPOS,
+                       max_segundos=limite_bnb, repeticiones=1)
+    print(f"\n{titulo} ({contar_combinaciones(jugadores, CUPOS):,} equipos posibles)")
+    print(f"Fuerza bruta: {bruto['probados']:,} probados, {t_bruto:.3f} s; "
+          f"{'terminada' if bruto['terminado'] else 'interrumpida (sin óptimo certificado)'}")
+    estado = "" if bnb["terminado"] else " [interrumpido: puntuación no certificada]"
+    print(f"Branch and Bound: {bnb['puntos']:.1f} puntos, {bnb['abiertos']:,} nodos abiertos, "
+          f"{bnb['extraidos']:,} extraídos, {t_bnb:.4f} s{estado}")
+    if bruto["terminado"] and bnb["terminado"]:
+        assert abs(bruto["puntos"] - bnb["puntos"]) < EPS
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sin-escala", action="store_true")
     parser.add_argument("--limite-bruta", type=float, default=1.0)
+    parser.add_argument("--limite-bnb", type=float, default=60.0)
+    parser.add_argument("--escala-dificil", action="store_true",
+                        help="añade la instancia de 60 jugadores con puntos correlacionados (~30 s)")
     args = parser.parse_args()
 
     formacion = "-".join(str(n) for n in CUPOS.values())
@@ -248,11 +306,12 @@ def main():
 
     bruto, t_bruto = medir(fuerza_bruta, JUGADORES, PRESUPUESTO, CUPOS)
     bnb, t_bnb = medir(branch_and_bound, JUGADORES, PRESUPUESTO, CUPOS)
+    print("\n(Tiempos: mejor de 5 ejecuciones con timeit.repeat)")
     imprimir_equipo("2. Fuerza bruta", bruto["equipo"], PRESUPUESTO, CUPOS)
     imprimir_equipo("3. Branch and Bound", bnb["equipo"], PRESUPUESTO, CUPOS)
     print(f"Fuerza bruta: {bruto['probados']:,} equipos, {bruto['viables']:,} viables, {t_bruto:.4f} s")
-    print(f"Branch and Bound: {bnb['abiertos']:,} nodos abiertos, "
-          f"{bnb['podados']:,} podados, {t_bnb:.4f} s")
+    print(f"Branch and Bound: {bnb['abiertos']:,} nodos abiertos (ramificados), "
+          f"{bnb['extraidos']:,} extraídos de la cola, {bnb['podados']:,} podados, {t_bnb:.4f} s")
     assert bruto["puntos"] is not None and bnb["puntos"] is not None
     assert abs(bruto["puntos"] - bnb["puntos"]) < EPS
 
@@ -262,18 +321,17 @@ def main():
         JUGADORES, PRESUPUESTO, CUPOS), 1), "; válida =",
           round(cota_superior(raiz, orden, PRESUPUESTO, CUPOS, tuple(CUPOS)), 1))
 
+    ingenuo = branch_and_bound(JUGADORES, PRESUPUESTO, CUPOS, cota="ingenua")
+    print(f"   B&B con la cota ingenua: {ingenuo['puntos']:.1f} puntos "
+          f"(óptimo real {bruto['puntos']:.1f}) -> "
+          f"{'coincide' if abs(ingenuo['puntos'] - bruto['puntos']) < EPS else 'NO coincide: poda el óptimo'}")
+
     if not args.sin_escala:
-        jugadores = generar_jugadores_aleatorios()
-        bruto60, t_bruto60 = medir(fuerza_bruta, jugadores, PRESUPUESTO, CUPOS,
-                                  max_segundos=args.limite_bruta)
-        bnb60, t_bnb60 = medir(branch_and_bound, jugadores, PRESUPUESTO, CUPOS)
-        print(f"\n5. Escala: 60 jugadores, {contar_combinaciones(jugadores, CUPOS):,} equipos posibles")
-        print(f"Fuerza bruta: {bruto60['probados']:,} probados, {t_bruto60:.3f} s; "
-              f"{'terminada' if bruto60['terminado'] else 'interrumpida (sin óptimo certificado)'}")
-        print(f"Branch and Bound: {bnb60['puntos']:.1f} puntos, "
-              f"{bnb60['abiertos']} nodos, {t_bnb60:.4f} s")
-        if bruto60["terminado"]:
-            assert abs(bruto60["puntos"] - bnb60["puntos"]) < EPS
+        escala("5a. Escala: 60 jugadores, precio y puntos independientes",
+               generar_jugadores_aleatorios(), args.limite_bruta, args.limite_bnb)
+        if args.escala_dificil:  # tarda ~30 s: precio y puntos correlacionados
+            escala("5b. Escala: 60 jugadores, puntos correlacionados con el precio",
+                   generar_jugadores_correlacionados(), args.limite_bruta, args.limite_bnb)
 
 
 if __name__ == "__main__":
