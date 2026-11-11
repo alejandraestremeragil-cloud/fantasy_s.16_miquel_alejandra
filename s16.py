@@ -146,6 +146,11 @@ def solucion_inicial(jugadores, presupuesto, cupos):
     return max((e for e in candidatos if es_equipo_valido(e, presupuesto, cupos)),
                key=puntos_equipo)
 
+def coste_minimo(jugadores, cupos):
+    """Coste del once más barato posible (los n más baratos de cada puesto)."""
+    return sum(sum(sorted(j["precio"] for j in jugadores if j["posicion"] == pos)[:n])
+               for pos, n in cupos.items())
+
 
 def branch_and_bound(jugadores, presupuesto, cupos, max_segundos=None, cota="valida"):
     """Decisiones fichar/no fichar; best-first con heapq y poda por cota.
@@ -307,6 +312,10 @@ def main():
     bruto, t_bruto = medir(fuerza_bruta, JUGADORES, PRESUPUESTO, CUPOS)
     bnb, t_bnb = medir(branch_and_bound, JUGADORES, PRESUPUESTO, CUPOS)
     print("\n(Tiempos: mejor de 5 ejecuciones con timeit.repeat)")
+    if bruto["puntos"] is None and bnb["puntos"] is None:
+        print(f"\nCon estos datos no existe ningún once posible: el más barato cuesta "
+              f"{coste_minimo(JUGADORES, CUPOS)} M€ y el presupuesto es {PRESUPUESTO} M€.")
+        return
     imprimir_equipo("2. Fuerza bruta", bruto["equipo"], PRESUPUESTO, CUPOS)
     imprimir_equipo("3. Branch and Bound", bnb["equipo"], PRESUPUESTO, CUPOS)
     print(f"Fuerza bruta: {bruto['probados']:,} equipos, {bruto['viables']:,} viables, {t_bruto:.4f} s")
